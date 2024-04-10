@@ -30,26 +30,29 @@ int main(int argc, char **argv) {
     if (argc == 3) {
         devide_idx = std::stoi(argv[2]);
     }
-    cudaErrCheck(cudaSetDevice(devide_idx));
 
     int M, N, K;
     float *C = nullptr, *C_cublas = nullptr;  // host matrices
     float *d_A = nullptr, *d_B = nullptr, *d_C = nullptr,
           *d_C_cublas = nullptr;  // device matrices
 
-    cublasHandle_t blas_handle;
-    cublasErrCheck(cublasCreate(&blas_handle));
+    
 
     float elapsed_time;
-    cudaEvent_t start, end;
-    cudaErrCheck(cudaEventCreate(&start));
-    cudaErrCheck(cudaEventCreate(&end));
+    
 
     // run the kernel
     printf("Running kernel version %d on device %d\n", kernel_version, devide_idx);
 
     for (auto size : SIZE) {
         cudaErrCheck(cudaSetDevice(devide_idx));
+
+        cublasHandle_t blas_handle;
+        cublasErrCheck(cublasCreate(&blas_handle));
+
+        cudaEvent_t start, end;
+        cudaErrCheck(cudaEventCreate(&start));
+        cudaErrCheck(cudaEventCreate(&end));
 
         M = N = K = size;
 
@@ -77,7 +80,8 @@ int main(int argc, char **argv) {
         // verify the correctness of the kernel && warm up so as to avoid the first-time
         // overhead overhead
         // 1) self-implemented kernel
-        RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, nullptr);
+        RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, blas_handle);
+        cudaErrCheck(cudaDeviceSynchronize());
         // 2) cuBLAS
         RunSgemmKernel(0, M, N, K, ALPHA, d_A, d_B, BETA, d_C_cublas, blas_handle);
         cudaErrCheck(cudaDeviceSynchronize());
@@ -85,6 +89,16 @@ int main(int argc, char **argv) {
         cudaMemcpy(C_cublas, d_C_cublas, M * N * sizeof(float), cudaMemcpyDeviceToHost);
         if (!IsMatrixEqual(C, C_cublas, M, N)) {
             printf("Matrix mismatch\n");
+
+            if (size <= 128) {
+                std::string err_file = "./debug/err_" + std::to_string(size) + ".txt";
+                printf("Writing matrix to %s\n", err_file.c_str());
+                std::ofstream out(err_file);
+                out << "Matrix C: \n";
+                PrintMatrix(C, M, N, out);
+                out << "Matrix C_cublas: \n";
+                PrintMatrix(C_cublas, M, N, out);
+            }
             exit(EXIT_FAILURE);
         }
 
@@ -92,7 +106,7 @@ int main(int argc, char **argv) {
         // measure the performance
         cudaErrCheck(cudaEventRecord(start));
         for (int i = 0; i < REPEAT_TIMES; i++) {
-            RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, nullptr);
+            RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, blas_handle);
         }
         cudaErrCheck(cudaEventRecord(end));
         cudaErrCheck(cudaEventSynchronize(end));
@@ -101,7 +115,7 @@ int main(int argc, char **argv) {
 
         long total_flop = 2 * long(M) * N * K * REPEAT_TIMES;
         double avg_elapsed_time = double(elapsed_time) / REPEAT_TIMES;
-        double gflops = (double)total_flop / 1e-9 / double(elapsed_time);
+        double gflops = (double)total_flop / 1e9 / double(elapsed_time);
         printf("Size: %d, Average elapsed time: %7.6f s, Performance: %7.2f GFLOPS. \n",
                size, avg_elapsed_time, gflops);
         fflush(stdout);
@@ -115,12 +129,12 @@ int main(int argc, char **argv) {
         cudaErrCheck(cudaFree(d_C));
         cudaErrCheck(cudaFree(d_C_cublas));
 
+        cublasErrCheck(cublasDestroy(blas_handle));
+        cudaErrCheck(cudaEventDestroy(start));
+        cudaErrCheck(cudaEventDestroy(end));
+
         cudaErrCheck(cudaDeviceReset());
     }
-
-    cublasErrCheck(cublasDestroy(blas_handle));
-    cudaErrCheck(cudaEventDestroy(start));
-    cudaErrCheck(cudaEventDestroy(end));
 
     return 0;
 }

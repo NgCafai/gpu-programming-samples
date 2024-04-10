@@ -13,7 +13,7 @@ template <const int BLOCK_ITEMS_M,  // Height in rows of a block-wide tile in ma
           const int THREAD_ITEMS_M, // Height in rows of a thread tile in C
           const int THREAD_ITEMS_N  // Width in columns of a thread tile in C
           >
-__global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, float *C)
+__global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
 {
     // block index - use 2D gridDim
     const int bx = blockIdx.x;
@@ -24,7 +24,7 @@ __global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, flo
 
     const int warp_id = tid / 32;
     const int lane_id = tid % 32;
-    const int THREAD_NUM_PER_BLOCK = blockDim.x;
+    const int THREAD_NUM_PER_BLOCK = (BLOCK_ITEMS_M / THREAD_ITEMS_M) * (BLOCK_ITEMS_N / THREAD_ITEMS_N);
 
     // map the threads in a warp tile to a 4x8 layout
     const int mma_tid_x = (lane_id / 2) % 8;
@@ -87,7 +87,7 @@ __global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, flo
 #pragma unroll
     for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M; offset += A_TILE_ROW_STRIDE)
     {
-        int ldg_reg_idx = i / A_TILE_ROW_STRIDE * 4;
+        int ldg_reg_idx = offset / A_TILE_ROW_STRIDE * 4;
         FETCH_FLOAT4(A_ldg_reg[ldg_reg_idx]) =
             FETCH_FLOAT4(A[OFFSET(A_tile_row_start + offset, // row
                                   A_tile_col_start,          // col
@@ -137,7 +137,7 @@ __global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, flo
             for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M;
                  offset += A_TILE_ROW_STRIDE)
             {
-                int ldg_reg_idx = i / A_TILE_ROW_STRIDE * 4;
+                int ldg_reg_idx = offset / A_TILE_ROW_STRIDE * 4;
                 FETCH_FLOAT4(A_ldg_reg[ldg_reg_idx]) =
                     FETCH_FLOAT4(A[OFFSET(A_tile_row_start + offset,         // row
                                           A_tile_col_start + block_tile_idx, // col
@@ -149,7 +149,7 @@ __global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, flo
             for (int offset = 0; offset + B_TILE_ROW_STRIDE <= BLOCK_ITEMS_K;
                  offset += B_TILE_ROW_STRIDE)
             {
-                int ldg_reg_idx = i / B_TILE_ROW_STRIDE * 4;
+                int ldg_reg_idx = offset / B_TILE_ROW_STRIDE * 4;
                 FETCH_FLOAT4(B_ldg_reg[ldg_reg_idx]) =
                     FETCH_FLOAT4(B[OFFSET(block_tile_idx + B_tile_row_start + offset, // row
                                           B_tile_col_start,                           // col
@@ -167,14 +167,14 @@ __global__ void SgemmV2(int M, int N, int K, const float *A, const float *B, flo
             // load next fragment from shared memory to register
             // load A fragment
             FETCH_FLOAT4(A_frag[(frag_k + 1) % 2][0]) =
-                FETCH_FLOAT(A_smem[read_stage_idx][frag_k + 1][A_smem_load_offset]);
+                FETCH_FLOAT4(A_smem[read_stage_idx][frag_k + 1][A_smem_load_offset]);
             FETCH_FLOAT4(A_frag[(frag_k + 1) % 2][4]) =
-                FETCH_FLOAT(A_smem[read_stage_idx][frag_k + 1][A_smem_load_offset + 4 * 4]);
+                FETCH_FLOAT4(A_smem[read_stage_idx][frag_k + 1][A_smem_load_offset + 4 * 4]);
             // load B fragment
             FETCH_FLOAT4(B_frag[(frag_k + 1) % 2][0]) =
-                FETCH_FLOAT(B_smem[read_stage_idx][frag_k + 1][B_smem_load_offset]);
+                FETCH_FLOAT4(B_smem[read_stage_idx][frag_k + 1][B_smem_load_offset]);
             FETCH_FLOAT4(B_frag[(frag_k + 1) % 2][4]) =
-                FETCH_FLOAT(B_smem[read_stage_idx][frag_k + 1][B_smem_load_offset + 8 * 4]);
+                FETCH_FLOAT4(B_smem[read_stage_idx][frag_k + 1][B_smem_load_offset + 8 * 4]);
 
             // compute on current fragment in a outter product way
 #pragma unroll

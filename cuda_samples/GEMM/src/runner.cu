@@ -10,7 +10,7 @@ void RunCublasFp32(cublasHandle_t handle, int M, int N, int K, float alpha, floa
                    float beta, float *d_C)
 {
     // cuBLAS uses column-major order. So we need to transpose the matrix A and B.
-    cublasErrCheck(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_T, M, N, K, &alpha, d_A, K, d_B, N,
+    cublasErrCheck(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, M, N, K, &alpha, d_B, K, d_A, N,
                                &beta, d_C, N));
 }
 
