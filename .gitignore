@@ -2,3 +2,4 @@ build/
 out/
 debug/
 .vscode-server/
+.vs/

@@ -13,15 +13,15 @@ const std::vector<int> SIZE = {128, 256, 512, 1024, 2048, 4096};
 
 int main(int argc, char **argv) {
     if (argc != 2) {
-        printf("Please select a kernel version (range 0 - 2, 0 for NVIDIA cuBLAS)\n");
+        printf("Please select a kernel version (range 0 - 3, 0 for NVIDIA cuBLAS)\n");
         exit(EXIT_FAILURE);
     }
 
     // get kernel_version
     int kernel_version = std::stoi(argv[1]);
-    if (kernel_version < 0 || kernel_version > 2) {
+    if (kernel_version < 0 || kernel_version > 3) {
         printf(
-            "Please enter a valid kernel version (range 0 - 2, 0 for NVIDIA cuBLAS)\n");
+            "Please enter a valid kernel version (range 0 - 3, 0 for NVIDIA cuBLAS)\n");
         exit(EXIT_FAILURE);
     }
 
@@ -113,7 +113,7 @@ int main(int argc, char **argv) {
         cudaErrCheck(cudaEventElapsedTime(&elapsed_time, start, end));
         elapsed_time /= 1000.0f;  // convert ms to s
 
-        long total_flop = 2 * long(M) * N * K * REPEAT_TIMES;
+        long long total_flop = static_cast<long long>(M) * N * K * REPEAT_TIMES * 2;
         double avg_elapsed_time = double(elapsed_time) / REPEAT_TIMES;
         double gflops = (double)total_flop / 1e9 / double(elapsed_time);
         printf("Size: %d, Average elapsed time: %7.6f s, Performance: %7.2f GFLOPS. \n",

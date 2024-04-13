@@ -1,10 +1,38 @@
 #pragma once
 
+#include <cooperative_groups.h>
+#include <cuda/barrier>
+
 // cal offset from row col and ld , in row-major matrix, ld is the width of the matrix
 #define OFFSET(row, col, ld) ((row) * (ld) + (col))
 
 // transfer float4
 #define FETCH_FLOAT4(data) (reinterpret_cast<float4 *>(&(data))[0])
+
+template <const int BLOCK_ITEMS_M, const int BLOCK_ITEMS_N, const int BLOCK_ITEMS_K,
+          const int A_TILE_ROW_STRIDE, const int B_TILE_ROW_STRIDE, typename BarrierType>
+__device__ __inline__ void LoadFromGmem(int N, int K, float *A, float *B,
+                                        float A_smem[BLOCK_ITEMS_K][BLOCK_ITEMS_M],
+                                        float B_smem[BLOCK_ITEMS_K][BLOCK_ITEMS_N], int A_tile_row,
+                                        int A_tile_col, int B_tile_row, int B_tile_col,
+                                        BarrierType &barrier)
+{
+    // load into A_smem
+#pragma unroll
+    for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M; offset += A_TILE_ROW_STRIDE)
+    {
+        cuda::memcpy_async(&A_smem[A_tile_col][A_tile_row + offset],
+                           &A[OFFSET(A_tile_row + offset, A_tile_col, K)], sizeof(float), barrier);
+    }
+
+    // load into B_smem
+#pragma unroll
+    for (int offset = 0; offset + B_TILE_ROW_STRIDE <= BLOCK_ITEMS_K; offset += B_TILE_ROW_STRIDE)
+    {
+        cuda::memcpy_async(&B_smem[B_tile_row + offset][B_tile_col],
+                           &B[OFFSET(B_tile_row + offset, B_tile_col, N)], sizeof(float), barrier);
+    }
+}
 
 /*
  * C = A * B, row-major
@@ -78,7 +106,7 @@ template <const int BLOCK_ITEMS_M,  // Height in rows of a block-wide tile in ma
           const int THREAD_ITEMS_M, // Height in rows of a thread tile in C
           const int THREAD_ITEMS_N  // Width in columns of a thread tile in C
           >
-__global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
+__global__ void SgemmV3(int M, int N, int K, float *A, float *B, float *C)
 {
     // block index - use 2D gridDim
     const int bx = blockIdx.x;
@@ -110,33 +138,34 @@ __global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
     // allocate register for C for thread tile
     float accum[THREAD_ITEMS_M][THREAD_ITEMS_N] = {0.0f};
 
+    // create barriers for synchronizing cuda::memcpy_async()
+    // __shared__ cuda::barrier<cuda::thread_scope::thread_scope_block> barriers[2];
+    using BarrierType = cuda::barrier<cuda::thread_scope::thread_scope_block>;
+    __shared__ char barrier_space[sizeof(BarrierType) * 2];
+    BarrierType *barriers = reinterpret_cast<BarrierType *>(barrier_space);
+    auto group = cooperative_groups::this_thread_block();
+    if (group.thread_rank() == 0)
+    {
+        init(&barriers[0], group.size());
+        init(&barriers[1], group.size());
+    }
+    __syncthreads();
+
     // -----------------------------------------------------------------------------
     // calculate the indices that this thread will load from globa memory into shared
-    // memory, and each thread will load 4 elements(16 bytes) at each step
-
-    // allocate register used to load global memory
-    // Note: each thread will load data in two steps:
-    //     1) load from global mem into registers; 2) store into shared memory.
-    // This is how the data is actually loaded from gmem to smem in Architecutre before
-    // Ampere. We just write the process explicitly to utilize ILP(Instruction Level
-    // Parallelism). In Ampere and later architectures, we can use cuda::memcpy_async().
-    //
-    // The size is the number of elements that each thread will load for one <block tile>.
-    float A_ldg_reg[BLOCK_ITEMS_M * BLOCK_ITEMS_K / THREAD_NUM_PER_BLOCK];
-    float B_ldg_reg[BLOCK_ITEMS_K * BLOCK_ITEMS_N / THREAD_NUM_PER_BLOCK];
+    // memory, and each thread will load 1 elements(4 bytes) at each step
 
     // thread number required to load data for one row of <block tile> of A and B
-    constexpr int A_TILE_THREAD_PER_ROW = BLOCK_ITEMS_K / 4;
-    constexpr int B_TILE_THREAD_PER_ROW = BLOCK_ITEMS_N / 4;
+    constexpr int A_TILE_THREAD_PER_ROW = BLOCK_ITEMS_K;
+    constexpr int B_TILE_THREAD_PER_ROW = BLOCK_ITEMS_N;
 
     // row and col index in <block tile> of A and B that this thread is responsible for
-    const int A_tile_row_start = tid / A_TILE_THREAD_PER_ROW;
-    const int A_tile_col_start = (tid % A_TILE_THREAD_PER_ROW) * 4;
-    const int B_tile_row_start = tid / B_TILE_THREAD_PER_ROW;
-    const int B_tile_col_start = (tid % B_TILE_THREAD_PER_ROW) * 4;
+    const int A_tile_row = tid / A_TILE_THREAD_PER_ROW;
+    const int A_tile_col = tid % A_TILE_THREAD_PER_ROW;
+    const int B_tile_row = tid / B_TILE_THREAD_PER_ROW;
+    const int B_tile_col = tid % B_TILE_THREAD_PER_ROW;
 
-    // if each thread needs to load more than 4 elements, then stride is used
-    // to move to the next target row
+    // stride is used to move to the next target row
     constexpr int A_TILE_ROW_STRIDE = THREAD_NUM_PER_BLOCK / A_TILE_THREAD_PER_ROW;
     constexpr int B_TILE_ROW_STRIDE = THREAD_NUM_PER_BLOCK / B_TILE_THREAD_PER_ROW;
 
@@ -149,32 +178,10 @@ __global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
 
     // --------------------------------------------------------
     // load first block tile from global mem to shared mem
-    // load into A_smem
-#pragma unroll
-    for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M; offset += A_TILE_ROW_STRIDE)
-    {
-        int ldg_reg_idx = offset / A_TILE_ROW_STRIDE * 4;
-        FETCH_FLOAT4(A_ldg_reg[ldg_reg_idx]) =
-            FETCH_FLOAT4(A[OFFSET(A_tile_row_start + offset, // row
-                                  A_tile_col_start,          // col
-                                  K)]);
-        // transpose the data
-        A_smem[0][A_tile_col_start][A_tile_row_start + offset] = A_ldg_reg[ldg_reg_idx];
-        A_smem[0][A_tile_col_start + 1][A_tile_row_start + offset] = A_ldg_reg[ldg_reg_idx + 1];
-        A_smem[0][A_tile_col_start + 2][A_tile_row_start + offset] = A_ldg_reg[ldg_reg_idx + 2];
-        A_smem[0][A_tile_col_start + 3][A_tile_row_start + offset] = A_ldg_reg[ldg_reg_idx + 3];
-    }
-
-    // load into B_smem
-#pragma unroll
-    for (int offset = 0; offset + B_TILE_ROW_STRIDE <= BLOCK_ITEMS_K; offset += B_TILE_ROW_STRIDE)
-    {
-        FETCH_FLOAT4(B_smem[0][B_tile_row_start + offset][B_tile_col_start]) =
-            FETCH_FLOAT4(B[OFFSET(B_tile_row_start + offset, // row
-                                  B_tile_col_start,          // col
-                                  N)]);
-    }
-    __syncthreads();
+    LoadFromGmem<BLOCK_ITEMS_M, BLOCK_ITEMS_N, BLOCK_ITEMS_K, A_TILE_ROW_STRIDE, B_TILE_ROW_STRIDE>(
+        N, K, A, B, A_smem[0], B_smem[0], A_tile_row, A_tile_col, B_tile_row, B_tile_col,
+        barriers[0]);
+    barriers[0].arrive_and_wait();
 
     // --------------------------------------------------------
     // load first fragment from shared memory to register for computation
@@ -190,37 +197,18 @@ __global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
     do
     {
         // --------------------------------------------------------
-        // load next block tile from global mem to register,
-        // which will be stored into shared mem later
+        // load next block tile from global mem to shared mem asynchronously
 
         // next block tile index
         block_tile_idx += BLOCK_ITEMS_K;
 
         if (block_tile_idx < K)
         {
-            // load into A_ldg_reg
-#pragma unroll
-            for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M;
-                 offset += A_TILE_ROW_STRIDE)
-            {
-                int ldg_reg_idx = offset / A_TILE_ROW_STRIDE * 4;
-                FETCH_FLOAT4(A_ldg_reg[ldg_reg_idx]) =
-                    FETCH_FLOAT4(A[OFFSET(A_tile_row_start + offset,         // row
-                                          A_tile_col_start + block_tile_idx, // col
-                                          K)]);
-            }
-
-            // load into B_ldg_reg
-#pragma unroll
-            for (int offset = 0; offset + B_TILE_ROW_STRIDE <= BLOCK_ITEMS_K;
-                 offset += B_TILE_ROW_STRIDE)
-            {
-                int ldg_reg_idx = offset / B_TILE_ROW_STRIDE * 4;
-                FETCH_FLOAT4(B_ldg_reg[ldg_reg_idx]) =
-                    FETCH_FLOAT4(B[OFFSET(block_tile_idx + B_tile_row_start + offset, // row
-                                          B_tile_col_start,                           // col
-                                          N)]);
-            }
+            LoadFromGmem<BLOCK_ITEMS_M, BLOCK_ITEMS_N, BLOCK_ITEMS_K, A_TILE_ROW_STRIDE,
+                         B_TILE_ROW_STRIDE>(N, K, A + block_tile_idx, B + block_tile_idx * N,
+                                            A_smem[write_stage_idx], B_smem[write_stage_idx],
+                                            A_tile_row, A_tile_col, B_tile_row, B_tile_col,
+                                            barriers[write_stage_idx]);
         }
 
         // --------------------------------------------------------
@@ -257,38 +245,13 @@ __global__ void SgemmV2(int M, int N, int K, float *A, float *B, float *C)
         }
 
         // --------------------------------------------------------
-        // load the next block tile from register to shared memory
+        // wait for the next block tile to be loaded
         if (block_tile_idx < K)
         {
-            // load into A_smem[write_stage_idx]
-#pragma unroll
-            for (int offset = 0; offset + A_TILE_ROW_STRIDE <= BLOCK_ITEMS_M;
-                 offset += A_TILE_ROW_STRIDE)
-            {
-                int ldg_reg_idx = offset / A_TILE_ROW_STRIDE * 4;
-                A_smem[write_stage_idx][A_tile_col_start][A_tile_row_start + offset] =
-                    A_ldg_reg[ldg_reg_idx];
-                A_smem[write_stage_idx][A_tile_col_start + 1][A_tile_row_start + offset] =
-                    A_ldg_reg[ldg_reg_idx + 1];
-                A_smem[write_stage_idx][A_tile_col_start + 2][A_tile_row_start + offset] =
-                    A_ldg_reg[ldg_reg_idx + 2];
-                A_smem[write_stage_idx][A_tile_col_start + 3][A_tile_row_start + offset] =
-                    A_ldg_reg[ldg_reg_idx + 3];
-            }
+            barriers[write_stage_idx].arrive_and_wait();
 
-            // load into B_smem[write_stage_idx]
-#pragma unroll
-            for (int offset = 0; offset + B_TILE_ROW_STRIDE <= BLOCK_ITEMS_K;
-                 offset += B_TILE_ROW_STRIDE)
-            {
-                int ldg_reg_idx = offset / B_TILE_ROW_STRIDE * 4;
-                FETCH_FLOAT4(B_smem[write_stage_idx][B_tile_row_start + offset][B_tile_col_start]) =
-                    FETCH_FLOAT4(B_ldg_reg[ldg_reg_idx]);
-            }
-
-            // use double buffer, only need one sync
-            __syncthreads();
             // switch read and write stage
+            __syncthreads();
             write_stage_idx ^= 1;
         }
 

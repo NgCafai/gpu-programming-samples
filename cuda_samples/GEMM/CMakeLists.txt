@@ -6,8 +6,9 @@ find_package(CUDA REQUIRED)
 enable_language(CUDA)
 include_directories(${CUDA_INCLUDE_DIRS})
 
-set(CUDA_NVCC_FLAGS ${CUDA_NVCC_FLAGS};--std=c++14)
-
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CUDA_ARCHITECTURES 80 86)
+# set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=-Wall,-Wextra")
 
 # Configure header file search paths
 include_directories(${CUDA_INCLUDE_DIRS})
