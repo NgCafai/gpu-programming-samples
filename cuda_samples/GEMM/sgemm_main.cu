@@ -8,7 +8,7 @@
 
 const int ALPHA = 1;
 const int BETA = 0;
-const int REPEAT_TIMES = 50;
+const int REPEAT_TIMES = 10;
 const std::vector<int> SIZE = {128, 256, 512, 1024, 2048, 4096};
 
 int main(int argc, char **argv) {
@@ -79,12 +79,13 @@ int main(int argc, char **argv) {
         // ----------------------------------------------------------------------------
         // verify the correctness of the kernel && warm up so as to avoid the first-time
         // overhead overhead
-        // 1) self-implemented kernel
-        RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, blas_handle);
-        cudaErrCheck(cudaDeviceSynchronize());
-        // 2) cuBLAS
+        // 1) cuBLAS
         RunSgemmKernel(0, M, N, K, ALPHA, d_A, d_B, BETA, d_C_cublas, blas_handle);
         cudaErrCheck(cudaDeviceSynchronize());
+        // 2) self-implemented kernel
+        RunSgemmKernel(kernel_version, M, N, K, ALPHA, d_A, d_B, BETA, d_C, blas_handle);
+        cudaErrCheck(cudaDeviceSynchronize());
+
         cudaMemcpy(C, d_C, M * N * sizeof(float), cudaMemcpyDeviceToHost);
         cudaMemcpy(C_cublas, d_C_cublas, M * N * sizeof(float), cudaMemcpyDeviceToHost);
         if (!IsMatrixEqual(C, C_cublas, M, N)) {

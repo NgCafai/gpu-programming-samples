@@ -45,7 +45,7 @@ void RunSgemmV3OptimizedA100(int M, int N, int K, float alpha, float *d_A, float
 {
     constexpr int BLOCK_ITEMS_M = 128;
     constexpr int BLOCK_ITEMS_N = 128;
-    constexpr int BLOCK_ITEMS_K = 8;
+    constexpr int BLOCK_ITEMS_K = 16;
     constexpr int THREAD_ITEMS_M = 8;
     constexpr int THREAD_ITEMS_N = 8;
     int total_thread_num = (BLOCK_ITEMS_M / THREAD_ITEMS_M) * (BLOCK_ITEMS_N / THREAD_ITEMS_N);
